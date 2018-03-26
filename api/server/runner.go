@@ -55,12 +55,6 @@ var (
 	bufPool = &sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 )
 
-type CallResponse struct {
-	Status      int
-	ContentType string
-	Data        interface{}
-}
-
 // CallFunction exposed to become the API extension, to let API listeners to be capable to call a functions
 // defined by app and path
 func (s *Server) CallFunction(app *models.App, path string, req *http.Request,
