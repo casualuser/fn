@@ -55,14 +55,22 @@ var (
 	bufPool = &sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 )
 
-// TODO it would be nice if we could make this have nothing to do with the gin.Context but meh
-// TODO make async store an *http.Request? would be sexy until we have different api format...
-func (s *Server) serve(c *gin.Context, app *models.App, path string) error {
+type CallResponse struct {
+	Status      int
+	ContentType string
+	Data        interface{}
+}
+
+// CallFunction exposed to become the API extension, to let API listeners to be capable to call a functions
+// defined by app and path
+func (s *Server) CallFunction(app *models.App, path string, req *http.Request,
+	respWriter http.ResponseWriter) (*string, io.Reader, error) {
+
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	writer := syncResponseWriter{
 		Buffer:  buf,
-		headers: c.Writer.Header(), // copy ref
+		headers: respWriter.Header(), // copy ref
 	}
 	defer bufPool.Put(buf) // TODO need to ensure this is safe with Dispatch?
 
@@ -75,36 +83,34 @@ func (s *Server) serve(c *gin.Context, app *models.App, path string) error {
 
 	call, err := s.agent.GetCall(
 		agent.WithWriter(&writer), // XXX (reed): order matters [for now]
-		agent.FromRequest(app, path, c.Request),
+		agent.FromRequest(app, path, req),
 	)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	model := call.Model()
 	{ // scope this, to disallow ctx use outside of this scope. add id for handleErrorResponse logger
-		ctx, _ := common.LoggerWithFields(c.Request.Context(), logrus.Fields{"id": model.ID})
-		c.Request = c.Request.WithContext(ctx)
+		ctx, _ := common.LoggerWithFields(req.Context(), logrus.Fields{"id": model.ID})
+		req = req.WithContext(ctx)
 	}
 
 	if model.Type == "async" {
 		// TODO we should push this into GetCall somehow (CallOpt maybe) or maybe agent.Queue(Call) ?
-		if c.Request.ContentLength > 0 {
-			buf.Grow(int(c.Request.ContentLength))
+		if req.ContentLength > 0 {
+			buf.Grow(int(req.ContentLength))
 		}
-		_, err := buf.ReadFrom(c.Request.Body)
+		_, err := buf.ReadFrom(req.Body)
 		if err != nil {
-			return models.ErrInvalidPayload
+			return nil, nil, models.ErrInvalidPayload
 		}
 		model.Payload = buf.String()
 
 		// TODO idk where to put this, but agent is all runner really has...
-		err = s.agent.Enqueue(c.Request.Context(), model)
+		err = s.agent.Enqueue(req.Context(), model)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-
-		c.JSON(http.StatusAccepted, map[string]string{"call_id": model.ID})
-		return nil
+		return &model.ID, nil, nil
 	}
 
 	err = s.agent.Submit(call)
@@ -114,9 +120,9 @@ func (s *Server) serve(c *gin.Context, app *models.App, path string) error {
 		if err == models.ErrCallTimeoutServerBusy || err == models.ErrCallTimeout {
 			// TODO maneuver
 			// add this, since it means that start may not have been called [and it's relevant]
-			c.Writer.Header().Add("XXX-FXLB-WAIT", time.Now().Sub(time.Time(model.CreatedAt)).String())
+			respWriter.Header().Add("XXX-FXLB-WAIT", time.Now().Sub(time.Time(model.CreatedAt)).String())
 		}
-		return err
+		return nil, nil, err
 	}
 
 	// if they don't set a content-type - detect it
@@ -136,9 +142,29 @@ func (s *Server) serve(c *gin.Context, app *models.App, path string) error {
 	writer.Header().Set("Content-Length", strconv.Itoa(int(buf.Len())))
 
 	if writer.status > 0 {
-		c.Writer.WriteHeader(writer.status)
+		respWriter.WriteHeader(writer.status)
 	}
-	io.Copy(c.Writer, &writer)
+
+	return nil, writer, nil
+}
+
+// TODO it would be nice if we could make this have nothing to do with the gin.Context but meh
+// TODO make async store an *http.Request? would be sexy until we have different api format...
+func (s *Server) serve(c *gin.Context, app *models.App, path string) error {
+	callID, syncWriter, err := s.CallFunction(app, path, c.Request, c.Writer)
+	if err != nil {
+		return err
+	}
+
+	if callID != nil {
+		c.JSON(http.StatusAccepted, map[string]string{"call_id": *callID})
+		return nil
+	}
+
+	if syncWriter != nil {
+		io.Copy(c.Writer, syncWriter)
+		return nil
+	}
 
 	return nil
 }

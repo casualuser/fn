@@ -126,14 +126,14 @@ func (e *extds) UpdateRoute(ctx context.Context, route *models.Route) (*models.R
 	return route, err
 }
 
-func (e *extds) RemoveRoute(ctx context.Context, appName string, routePath string) error {
-	err := e.rl.BeforeRouteDelete(ctx, appName, routePath)
+func (e *extds) RemoveRoute(ctx context.Context, appID string, routePath string) error {
+	err := e.rl.BeforeRouteDelete(ctx, appID, routePath)
 	if err != nil {
 		return err
 	}
-	err = e.Datastore.RemoveRoute(ctx, appName, routePath)
+	err = e.Datastore.RemoveRoute(ctx, appID, routePath)
 	if err != nil {
 		return err
 	}
-	return e.rl.AfterRouteDelete(ctx, appName, routePath)
+	return e.rl.AfterRouteDelete(ctx, appID, routePath)
 }
